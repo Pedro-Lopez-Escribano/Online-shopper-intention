@@ -1,4 +1,4 @@
-# Online shopper intention
+# Online shoppers intention
 
 * I have developed this project with the purpose of testing the h2o API and some libraries to visualize the performance of the ML algorithms, also to remember some things about R.
 
