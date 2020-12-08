@@ -1,0 +1,730 @@
+---
+title: "Online Shoppers Intention"
+author: "Pedro López-Escribano Zamora"
+date: "1/12/2020"
+output:
+  html_document: default
+subtitle: Technical Report
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Proyect Description
+
+## General objective 
+* Analyze the behavior and purchases of users in an online store and determine which characteristics have more weight to make a purchase or not.
+
+## Specific objective 
+* Create a model that allows estimating the probability a user has to make a purchase, in this way commercial decisions can be made, such as offering specific offers or recommending a series of products similar to those that the user is looking for.
+
+## Data Description
+
+* The dataset consists of 10 numerical and 8 categorical attributes, with 12330 observation (users).
+* The **'Revenue'** attribute is a Boolean field, where TRUE means that the user bought an item. This attribute is what we want to predict with Machine Learning models.
+* **"Administrative", "Administrative Duration", "Informational", "Informational Duration", "Product Related" and "Product Related Duration"** represent the number of different types of pages visited by the visitor in that session and total time spent in each of these page categories. The values of these features are derived from the URL information of the pages visited by the user and updated in real time when a user takes an action, e.g. moving from one page to another. 
+* The **"Bounce Rate"**, **"Exit Rate"** and **"Page Value"** features represent the metrics measured by "Google Analytics" for each page in the e-commerce site. 
++ The value of **"Bounce Rate"** feature for a web page refers to the percentage of visitors who enter the site from that page and then leave ("bounce") without triggering any other requests to the analytics server during that session. 
++ The value of **"Exit Rate"** feature for a specific web page is calculated as for all pageviews to the page, the percentage that were the last in the session.
++ The **"Page Value"** feature represents the average value for a web page that a user visited before completing an e-commerce transaction.
+* The **"Special Day"** feature indicates the closeness of the site visiting time to a specific special day (e.g. Mother’s Day, Valentine's Day) in which the sessions are more likely to be finalized with transaction. The value of this attribute is determined by considering the dynamics of e-commerce such as the duration between the order date and delivery date. For example, for Valentina’s day, this value takes a nonzero value between February 2 and February 12, zero before and after this date unless it is close to another special day, and its maximum value of 1 on February 8.
+* The dataset also includes **operating system, browser, region, traffic type, visitor type** as returning or new visitor, a Boolean value indicating whether the date of the visit is **weekend**, and **month** of the year, we have ten months, January and April are missing, we don't know if February and December are complete.
+
+## Session Information
+```{r}
+sessionInfo()
+```
+## Librarys
+
+```{r message=FALSE, warning=FALSE}
+library(ellipsis)
+library(tidyverse)
+library(broom)
+library(purrr)
+library(dummies)
+library(scales)
+library(GGally)
+library(corrplot)
+library(gridExtra)
+library(grid)
+library(h2o)
+library(xgboost)
+library(ggpubr)
+library(caret)
+library(Metrics)
+library(e1071)
+library(Ckmeans.1d.dp)
+library(usethis)
+library(glue)
+library(devtools)
+library(lares)         #install_github("laresbernardo/lares", dependencies = TRUE)
+library(modelplotr)   #install_github("modelplot/modelplotr")
+```
+
+# Load data and check
+
+```{r}
+data <- read.csv("raw_data/online_shoppers_intention.csv")
+str(data)
+summary(data)
+
+```
+
+* With the summary function we can see that **14** rows contain NA's.
+
+# Clean and transform
+
+* We are going to check the unique values and analyze the NA's
+
+```{r}
+nuniques <- as.data.frame(sapply(data, function(x) length(unique(x))))
+colnames(nuniques) <- "n_unique"
+rownames_to_column(nuniques, "Variable")
+data[rowSums(is.na(data)) > 0,]
+```
+
+* I am going to transform the columns below 18 and above 2 unique values to a categorical type (factor type in R) and convert the month variable into an ordered categorical variable, in order to obtain a good visualization when we graph the data.
+
+* We can see some patterns in the NA values.
+    + 14 rows with NA's in the same columns.
+    + All these values belong March.
+    + Visitor type "Returning_Visitor".
+    + Revenue "FALSE".
+* These NA's are probably due to a failure in the data collection, as there are so few I will simply delete them.
+
+```{r}
+for (row in row.names(nuniques)){
+    if (nuniques[row,] < 18 & nuniques[row,] > 2)
+        data[[row]] <- factor(data[[row]])
+}
+df <- drop_na(data)
+df$Month<- fct_relevel(df$Month, c("Feb", "Mar", "May", "June", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+df$Month<- factor(df$Month, ordered = T)
+str(df)
+```
+
+
+# EDA
+
+## Univariate analysis per data type
+
+* I'm going to plot by data type, using one geometry or another depends on this.
+
+### Factor
+
+```{r, warning=FALSE, fig.width=14, fig.height=8}
+df %>%
+select_if(is.factor) %>% 
+    gather() %>% 
+    ggplot(aes(x = value)) +
+    facet_wrap(~ key, scales = "free") +
+    geom_bar()
+```
+
+* Proportions of each value
+
+```{r}
+props<- function(var){ 
+  group <- group_by(df, df[[var]]) %>% summarize(n = n()) %>% 
+  ungroup() %>% mutate(prop = n/sum(n)) %>% select(1,3) 
+  colnames(group) <- c(var, "prop")
+  group
+} 
+
+for (var in colnames(select_if(df, is.factor))){
+  print(props(var))
+}
+```
+
+### Boolean
+
+```{r, warning=FALSE, fig.width=14, fig.height=8}
+df %>%
+select_if(is.logical) %>% 
+    gather() %>% 
+    ggplot(aes(x = value)) +
+    facet_wrap(~ key, scales = "free") +
+    geom_bar()
+```
+
+* Proportions of each value
+
+```{r}
+for (var in colnames(select_if(df, is.logical))){
+  print(props(var))
+}
+```
+
+### Numeric
+
+```{r, warning=FALSE, fig.width=14, fig.height=8}
+df %>%
+    select_if(is.numeric) %>% 
+    gather() %>% 
+    ggplot(aes(x = value)) +
+        facet_wrap(~ key, scales = "free") +
+        geom_histogram() + 
+            labs(title = "Histograms")
+
+df %>%
+    select_if(is.numeric) %>% 
+    gather() %>% 
+    ggplot(aes(x = value)) +
+        facet_wrap(~ key, scales = "free") +
+        stat_ecdf() + 
+            labs(title = "ECDF")
+```
+
+
+* Most variables have many values at or near 0, in other words, they have positive skewness. 
+We can use the fitdistrplus library to find out which distribution our data best fits.
+However, this function does not evaluate all possible distributions, but it does give us enough information.
+
+```{r, warning=FALSE, fig.width=14, fig.height=8}
+
+num_vars <- df %>% select_if(is.numeric)
+
+for (var in colnames(num_vars)){
+    if (n_distinct(df[[var]]) <= 28){
+        print(fitdistrplus::descdist(df[[var]], discrete = T, boot = 500, method = "sample")) #Discrete vars
+        print(title(var, outer = T, cex.main = 1, line = -3.5))
+    }
+    else{
+        print(fitdistrplus::descdist(df[[var]], discrete = F, boot = 500, method = "sample")) #Continous vars
+        print(title(var, outer = T, cex.main = 1, line = -3.5))
+    }
+}
+
+
+```
+
+* You can find useful information about the different distributions and parameters to use for Skew distributions to the right on wikipedia https://en.wikipedia.org/wiki/Probability_distribution_fitting
+
+## Bivariate analysis
+
+### Categorical variables
+
+* The variable to predict is binary so I'm going to graph the count of the variable to compare and the proportion in which each value is False or True.
+
+```{r, warning=FALSE, fig.width=14, fig.height=8, message=FALSE}
+plot_var_Revenue<- function(x){
+    group<- df %>% group_by(df[,x], Revenue) %>% summarize(n = n()) %>% 
+        mutate(prop = n/sum(n)) %>% rename(var = "df[, x]")
+    
+    g0<-ggplot(group,aes(x = var, y = prop, fill = Revenue)) + 
+        geom_col() +
+        geom_text(aes(label = percent(prop)), vjust = -0.5) + 
+        scale_y_continuous(labels = scales::percent) + 
+        labs(x = x,
+             title = paste("Revenue percent by",x)) + 
+        theme(legend.position="bottom")
+    
+    prop_count<- df %>% group_by(df[,x]) %>% summarize(n = n()) %>% 
+        mutate(prop = n/sum(n)) %>% rename(var = "df[, x]")
+    
+    g1<-ggplot(prop_count, aes(x = var, y=prop)) + 
+        geom_col() + 
+        geom_text(aes(label = percent(prop)), vjust = -0.5) +
+            scale_y_continuous(labels = scales::percent) +
+                labs(x = x,
+                 title = paste("Visitors proportion by", x) ) +
+        expand_limits(y = seq(0,1, by = .1))
+        
+    
+    grid.arrange(g1, g0, nrow = 2, ncol =1)
+}
+cat_vars<- df %>% select_if(is.factor) %>% colnames()
+
+for (var in cat_vars){
+  print(var)
+  plot_var_Revenue(var)
+}
+
+plot_var_Revenue("Weekend")
+```
+
+
+* if we analyze in more depth the variable month, we can realize a couple of things
+
+```{r, fig.width=14, fig.height=14}
+prop_count_revenue_T<- df %>%filter(Revenue == T) %>%group_by(Month) %>% summarize(n = n()) %>% 
+  mutate(prop = n/sum(n))
+
+
+prop_count<- df %>% group_by(Month) %>% summarize(n = n()) %>% 
+  mutate(prop = n/sum(n))
+
+count_sales_corr<- cor.test(prop_count_revenue_T$prop, prop_count$prop)
+
+
+plot_month_Revenue<- function(x){
+  group<- df %>% group_by(df[,x], Revenue) %>% summarize(n = n()) %>% 
+    mutate(prop = n/sum(n)) %>% rename(var = "df[, x]")
+  
+  g0<-ggplot(group,aes(x = var, y = prop, fill = Revenue)) + 
+    geom_col() +
+    geom_text(aes(label = percent(prop)), vjust = -0.5) + 
+    scale_y_continuous(labels = scales::percent) + 
+    labs(x = x,
+         title = paste("Revenue percent by",x)) + 
+    theme(legend.position="bottom")
+  
+  prop_count<- df %>% group_by(df[,x]) %>% summarize(n = n()) %>% 
+    mutate(prop = n/sum(n)) %>% rename(var = "df[, x]")
+  
+  g1<-ggplot(prop_count, aes(x = var, y=prop)) + 
+    geom_col() + 
+    geom_text(aes(label = percent(prop)), vjust = -0.5) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = x,
+         title = paste("Visitors proportion by", x) ) 
+  
+  prop_count_revenue_T<- df %>%filter(Revenue == T) %>%group_by(Month) %>% summarize(n = n()) %>% 
+    mutate(prop = n/sum(n))
+  
+  g2<- ggplot(prop_count_revenue_T, aes(x = Month, y=prop)) + 
+    geom_col(fill = "#00BA38") + 
+    geom_text(aes(label = percent(prop)), vjust = -0.5) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = x,
+         title = paste("Proportion of purchases by Month"))
+
+  grid.arrange(g1, g2, g0, nrow = 3, ncol =1)
+}
+
+plot_month_Revenue("Month")
+
+```
+
+* We can observe a relationship between the number of visitors and the number of sales, the result of the correlation test, correlation on average is **`r round(count_sales_corr$estimate[[1]],2)`** with a 95% confidence interval **[`r round(count_sales_corr$conf.int[1],2)` , `r round(count_sales_corr$conf.int[2],2)`]**
+
+* We only have 10 pairs, one for each month, we can create a simple regression model to estimate the benefit proportion based on the proportion of visitors, the most optimal way to do this task would be to create a model for each month, but since We only have 10 months of 1 year this would not make sense. Anyway we can create the model and make predictions only for the months with a prediction error (residual) close to 0.
+
+```{r}
+df_prop<-data.frame(prop_count_revenue_T$prop,prop_count$prop)
+names(df_prop) <- c("prop_revenue_T", "prop_count")
+df_prop<- cbind(levels(df$Month),df_prop) %>% rename(Month = "levels(df$Month)")
+
+mode_lm<-lm(prop_revenue_T~prop_count, data = df_prop)
+summary(mode_lm)
+df_lm<- augment(mode_lm, df_prop)
+df_lm %>% select(Month:.fitted, .resid) 
+
+```
+
+* June and July are the months in which we can expect our prediction to be most accurate. Now we can answer the question: What proportion of sales can we obtain if we manage to increase the proportion of visits by 5% in June or July?
+
+```{r}
+pred_months<- df_lm %>% select(Month:prop_count) %>% filter(Month %in% c("June", "Jul"))
+prop_count_fixed <- c( pred_months$prop_count + 0.05)
+pred_prop_revenue<-predict(mode_lm, newdata = list(prop_count = pred_months$prop_count + 0.05))
+improvement<- pred_prop_revenue - pred_months$prop_revenue_T
+results<- tibble(cbind(pred_months, prop_count_fixed, pred_prop_revenue,improvement))
+results
+```
+
+* If we manage to increase June or July visits by **5%**, we can expect to see an improvement of  **`r round(results$improvement[1]*100,2)`%** and **`r round(results$improvement[2]*100,2)`%** respectively
+
+
+
+### Numerical variables
+
+```{r, warning=FALSE, fig.width=14, fig.height=8, message=FALSE}
+
+for (var in colnames(num_vars)){
+    print(var)
+    jit<- ggplot(df,aes(x = Revenue, y = df[,var])) + 
+            geom_jitter(aes(color = Revenue),show.legend = F) + 
+              labs(y = var,
+                   title = "Jitterplot") +
+                theme(axis.title.y = element_blank())
+    
+    box<- ggplot(df,aes(x = Revenue, y = df[,var])) + 
+            geom_boxplot(aes(fill = Revenue),show.legend = F) + 
+                labs(y = var,
+                     title = "Boxplot")
+    ecdf<- ggplot(df,aes(df[,var])) + 
+            stat_ecdf(aes(color = Revenue)) +
+                labs(x = var,
+                     y = "Probs",
+                     title = "Ecdf") + 
+                expand_limits(x = seq(0, max(df[,var]), by = 1))
+    
+    grid.arrange(ecdf,arrangeGrob( box, jit ,ncol = 2), nrow = 2)
+}
+
+```
+
+
+# Machine Learning
+
+## Introduction
+
+* I am going to apply machine learning classification algorithms that are part of supervised learning, in other words, a field is required which has labels to be able to train the algorithm, our field will be Revenue, since we want to predict when a customer makes a purchase.
+
+* As we have already seen, Revenue can be False or True, we are interested in predicting as accurately as possible when this value will be True.
+
+* I have used the H2o API to run different models, the Caret package to implement and optimize the XGBoost algorithm and the Lares library that allows using the H2O API and facilitates the use of some graphics to understand the commercial value of the algorithm.
+
+## Techniques used
+
+* I have used 3 techniques to avoid overtraining
+  + Train/Test split.
+  + Stratified cross validation.
+  + Early stop (for boosting based algorithms).
+* The algorithms are evaluated with 3 metrics
+  + **AUC** (area under the curve)  If we obtain a perfect classifier, then the AUC score is 1.0. If the classifier is random in its guesses, then the AUC score is 0.5.
+  + **LogLoss**  it is a measure of uncertainty (you may call it entropy), so a low Log Loss means a low uncertainty/entropy of your model. Log Loss is similar to the Accuracy, but it will favor models that distinguish more strongly the classes.
+  + **Error class 1** it is the proportion of error of the algorithm with respect to class 1 (Revenue = True), in technical vocabulary **1 - recall**.
+
+## H2o
+  
+### H2o connection
+
+```{r}
+h2o.init(
+    ip = "localhost",
+    nthreads = -1,
+    max_mem_size = "4g"
+)
+```
+
+### Data preparation for H2o
+
+```{r}
+
+df1<- df
+df1$Month <- as.character(df1$Month) # H2O don't allows Ordered factors
+df_h2o<- as.h2o(df1)
+df_h2o$Month <- h2o.asfactor(df_h2o$Month)
+h2o.describe(df_h2o)
+
+#--------------------------------Train/Test split-----------------------------------------------
+
+particiones <- h2o.splitFrame(data = df_h2o, ratios = c(0.8), seed = 33)
+train <- h2o.assign(data = particiones[[1]], key = "train")
+test <- h2o.assign(data = particiones[[2]], key = "test")
+
+train$Revenue <- h2o.asfactor(train$Revenue)
+test$Revenue <- h2o.asfactor(test$Revenue)
+
+y <- "Revenue"
+x <-setdiff(h2o.colnames(df_h2o),y)
+
+h2o.table(train$Revenue)/h2o.nrow(train$Revenue)
+h2o.table(test$Revenue)/h2o.nrow(test$Revenue)
+```
+
+* Really unbalanced classes, this problem will be solved by adjust some arguments in the model construction.
+
+### Data preparation for XGBoost
+
+```{r, warning=FALSE}
+df$Month <- as.numeric(df$Month)
+df1<-df
+#-------Transform all categorical variables to factor, to allows us convert it to dummies variables
+for (col in colnames(df1)){
+    if (n_distinct(df1[[col]]) > 2 & n_distinct(df1[[col]]) < 21){
+        df1[[col]] <- factor(df1[[col]])
+    }
+}
+
+df1<- dummy.data.frame(df1, dummy.classes = "factor")
+for (col in colnames(df1)){
+    if (class(df1[[col]]) == "factor"){
+        df1[[col]] <- as.numeric(df1[[col]])
+    }
+}
+#------------------Train/Test split----------------------------
+set.seed(33)
+validation_index<-createDataPartition(df1$Revenue, p=0.8, list=FALSE)
+testSet<-df1[-validation_index,]
+trainSet<-df1[validation_index,]
+
+
+```
+
+## Models
+
+### H2O
+
+```{r, eval=FALSE}
+model_glm <- h2o.glm(
+    y= y, x= x, training_frame= train,validation_frame = test,
+    family= "binomial", link= "logit",
+    standardize= T, balance_classes= T, 
+    lambda_search= T,
+    solver= "AUTO", alpha= 0.95,
+    seed= 33,
+    nfolds= 5, fold_assignment = "Stratified",
+    model_id = "model_glm"
+)
+
+model_dp <- h2o.deeplearning( y= y, x= x, training_frame= train,validation_frame = test,
+                              balance_classes = TRUE, standardize = TRUE,
+                              activation = "Tanh", epochs = 1000, epsilon = 0.0003,
+                              loss = "CrossEntropy",input_dropout_ratio = 0.3,
+                              stopping_rounds = 5, stopping_metric = "logloss",
+                              categorical_encoding = "Binary", verbose = T, model_id = "model_dp")
+
+
+auto_ML<- h2o.automl(x= x, y= y,training_frame = train, validation_frame = test,
+                     nfolds = 5, balance_classes = T)
+```
+
+
+### XGBoost with Grid Search
+
+* We will run 2160 models to get the best hyperparameters(432 combinations with kfolds = 5).
+
+```{r, eval=FALSE}
+param <- expand.grid(nrounds = c(50,100),
+                      max_depth = c(5, 6, 10, 12), 
+                      eta = c(0.3, 0.1, 0.03), gamma = c(0.5, 1),
+                      colsample_bytree = c(0.8, 0.9, 1), min_child_weight = 1,
+                      subsample = c(0.5,0.8, 1))  
+set.seed(33)
+xgb_trcontrol = trainControl(
+    method = "cv",
+    number = 5,
+    verboseIter = TRUE,
+    returnData = FALSE,
+    returnResamp = "all",              # save losses across all models
+    classProbs = TRUE,                 # set to TRUE for LogLoss to be computed
+    allowParallel = TRUE,
+    summaryFunction = mnLogLoss,
+    preProcOptions = "scale")          #scale numeric variables
+
+set.seed(33)
+fit.xgb <- train(x = as.matrix(select(trainSet,-Revenue)),
+                 y = factor(trainSet$Revenue, labels = c("first_class", "second_class")),
+                 method="xgbTree",
+                 metric="logLoss", trControl=xgb_trcontrol ,tuneGrid=param)
+```
+
+
+
+```{r, include=FALSE}
+model1 <- h2o.loadModel(path = "ML_models/StackedEnsemble_BestOfFamily_AutoML_20201021_084846")
+model2 <- h2o.loadModel(path = "ML_models/GBM_grid__1_AutoML_20201021_084846_model_60")
+model3 <- h2o.loadModel(path = "ML_models/GBM_grid__1_AutoML_20201021_084846_model_32")
+
+model_dp <- h2o.loadModel(path = "ML_models/model_dp")
+model_glm <- h2o.loadModel(path = "ML_models/model_glm")
+
+load(paste(getwd(),"/ML_models/fit.xgb.RData", sep = ""))
+```
+
+## Model Evaluation
+
+```{r}
+eval <- predict(fit.xgb, testSet,type = "prob")[["second_class"]] > 0.5
+
+confusion_matrix_xgb0 <- cbind(testSet$Revenue, eval) %>% 
+    data.frame() %>%
+    table() %>% confusionMatrix()
+
+models <- c("Stacked Ensemble auto", "GBM0 auto","GBM1 auto","GLM","Deep Learning","XGB")
+
+error_class_1 <- round(c(h2o.confusionMatrix(model1, valid=T)[,3][2],
+                  h2o.confusionMatrix(model2, valid=T)[,3][2],
+                  h2o.confusionMatrix(model3, valid=T)[,3][2],
+                  h2o.confusionMatrix(model_glm, valid=T)[,3][2],
+                  h2o.confusionMatrix(model_dp, valid=T)[,3][2],
+                  confusion_matrix_xgb0$table[2,1] / 
+                      (confusion_matrix_xgb0$table[2,1] + confusion_matrix_xgb0$table[2,2])),4)
+
+logloss_ <- round(c(h2o.logloss(h2o.performance(model1, valid = T)),
+              h2o.logloss(h2o.performance(model2, valid = T)),
+              h2o.logloss(h2o.performance(model3, valid = T)),
+              h2o.logloss(h2o.performance(model_glm, valid = T)),
+              h2o.logloss(h2o.performance(model_dp, valid = T)),
+              logLoss(testSet$Revenue, predict(fit.xgb, testSet,type = "prob")[["second_class"]])),4)
+              
+auc_ <- round(c(h2o.auc(h2o.performance(model1, valid = T)),
+          h2o.auc(h2o.performance(model2, valid = T)),
+          h2o.auc(h2o.performance(model3, valid = T)),
+          h2o.auc(h2o.performance(model_glm, valid = T)),
+          h2o.auc(h2o.performance(model_dp, valid = T)),
+          auc(testSet$Revenue, predict(fit.xgb, testSet,type = "prob")[["second_class"]])),4)
+
+
+eval_models <- data.frame(models, auc_, logloss_, error_class_1, stringsAsFactors = F) %>%
+    arrange(desc(auc_))
+eval_models
+
+```
+
+
+* The table is sorted in descending order by auc_, the models with "auto" termination are created automatically with h2o. The winning model is XGBoost, it should be noted that with a manual configuration of hyperparameters was already the best, but also made a search for the best hyperparameters using Grid Search.
+
+* Next I try h2o with the Lares library that allows us to configure some more parameters, I will select the best model and compare it with XGBoost
+
+```{r}
+lares_auto<-h2o_automl(df1, y = "Revenue", target = "TRUE" , split = 0.8, balance = TRUE, scale = TRUE, max_models = 10, exclude_algos = NULL, project ="Online shoppers intentions", seed = 33,
+                       stopping_metric = "AUC", stopping_rounds = 5, no_outliers = F)
+```
+
+```{r}
+#---------------------------------------Evaluation best models-------------------------------------
+best_models <- c("GBM","XGBoost")
+
+error_class_1 <- round(c(h2o.confusionMatrix(lares_auto$model,)[,3][2],
+                   confusion_matrix_xgb0$table[2,1] / 
+                       (confusion_matrix_xgb0$table[2,1] + confusion_matrix_xgb0$table[2,2])),4)
+
+logloss_ <- round(c(h2o.logloss(h2o.performance(lares_auto$model, xval = T)),
+            logLoss(testSet$Revenue, predict(fit.xgb, testSet,type = "prob")[["second_class"]])),4)
+
+auc_ <- round(c(h2o.auc(h2o.performance(lares_auto$model, xval = T)),
+        auc(testSet$Revenue, predict(fit.xgb, testSet,type = "prob")[["second_class"]])),4)
+
+eval_best_models <- data.frame(best_models, auc_, logloss_, error_class_1) %>% arrange(desc(auc_))
+eval_best_models
+
+```
+
+* XGBoost has better results
+* Although we have unbalanced classes (85% for Revenue = FALSE and 15% for Reveneu = TRUE), the results are not bad, we will try to improve them using the SMOTE method to balance the classes 
+
+### Smote
+
+```{r}
+trainSet$Revenue<- as.factor(trainSet$Revenue)
+smoted_data <- DMwR::SMOTE(Revenue ~ ., trainSet, perc.over=100)
+smoted_data$Revenue<- as.numeric(smoted_data$Revenue)
+
+prop.table(table(smoted_data$Revenue))
+
+```
+
+* Now classes are balance, let's apply same grid search and compare results
+
+```{r, eval=FALSE}
+param <-  expand.grid(nrounds = c(50,100),
+                      max_depth = c(5, 6, 10, 12), 
+                      eta = c(0.3, 0.1, 0.03), gamma = c(0.5, 1),
+                      colsample_bytree = c(0.8, 0.9, 1), min_child_weight = 1,
+                      subsample = c(0.5,0.8, 1))  
+set.seed(33)
+xgb_trcontrol = trainControl(
+    method = "cv",
+    number = 5,
+    verboseIter = TRUE,
+    returnData = FALSE,
+    returnResamp = "all",              # save losses across all models
+    classProbs = TRUE,                 # set to TRUE for LogLoss to be computed
+    allowParallel = TRUE,
+    summaryFunction = mnLogLoss,
+    preProcOptions = "scale",  #scale numeric variables
+    seeds = 33)          
+set.seed(33)
+smote_fit.xgb <- train(x = as.matrix(select(smoted_data,-Revenue)),
+                       y = factor(smoted_data$Revenue, labels = c("first_class", "second_class")),
+                       method="xgbTree",
+                       metric="logLoss", trControl=xgb_trcontrol ,tuneGrid=param)
+
+```
+
+### Evaluation XGBoost and XGBoost Smote
+
+```{r, include=FALSE }
+load(paste(getwd(),"/ML_models/smote_fit.xgb.RData", sep = ""))
+```
+
+
+```{r}
+
+eval <- predict(smote_fit.xgb, testSet,type = "prob")[["second_class"]] > 0.5
+
+confusion_matrix_xgb1 <- cbind(testSet$Revenue,eval) %>% 
+    data.frame() %>%
+    table() %>% confusionMatrix()
+
+models <- c("XGB", "XGB Smote")
+
+error_class_1 <- round(c(confusion_matrix_xgb0$table[2,1] / 
+                             (confusion_matrix_xgb0$table[2,1] + confusion_matrix_xgb0$table[2,2]),
+                         confusion_matrix_xgb1$table[2,1] / 
+                             (confusion_matrix_xgb1$table[2,1] + confusion_matrix_xgb1$table[2,2])),4)
+
+logloss_ <- round(c(logLoss(testSet$Revenue, predict(fit.xgb, testSet,type = "prob")[["second_class"]]),
+                    logLoss(testSet$Revenue, predict(smote_fit.xgb, testSet,type = "prob")[["second_class"]])),4)
+
+auc_ <- round(c(auc(testSet$Revenue, predict(fit.xgb, testSet,type = "prob")[["second_class"]]),
+                auc(testSet$Revenue, predict(smote_fit.xgb, testSet,type = "prob")[["second_class"]])),4)
+
+
+eval_models_xgb <- data.frame(models, auc_, logloss_, error_class_1, stringsAsFactors = F) %>%
+    arrange(desc(auc_))
+eval_models_xgb 
+
+```
+
+* AUC is basically the same, logloss does not improve, but we have managed to reduce the classification error in our target class by more than half, so we will use XGBoost with smote
+
+* Let's see which variables are the most important in our model
+
+
+```{r, warning=FALSE, message=FALSE}
+xgb_varImp <- varImp(smote_fit.xgb, scale = F)$importance
+xgb_varImp <- rownames_to_column(xgb_varImp,"Variables")
+ggplot(head(xgb_varImp,10), aes(x= Overall, y=fct_reorder(Variables, Overall))) + 
+    geom_col() + 
+        labs(x = "Importance",
+             y = "Variable",
+             title = "XGBoost Variables Importance")
+
+```
+
+* As we expected after observing the distributions, by far the most important variable is **Page Value**.
+
+
+### Evaluation XGBoost Smote with plots
+
+* Plots by Lares packages
+
+```{r, warning=FALSE, fig.width=14, fig.height=8, message=FALSE}
+mplot_full(tag = testSet$Revenue, 
+           score =predict(smote_fit.xgb, testSet,type = "prob")[["second_class"]] , model_name = "XGBoost with Smote")
+
+```
+
+* If any of these graphics are not familiar to you, you can get more information at https://datascienceplus.com/machine-learning-results-one-plot-to-rule-them-all/
+
+* Confusion matrix
+
+```{r, fig.width=14, fig.height=8, message=FALSE}
+mplot_conf(tag = testSet$Revenue, 
+           score =predict(smote_fit.xgb, testSet,type = "prob")[["second_class"]],model_name = "XGBoost with Smote")
+
+```
+
+
+## Business evaluation
+
+### Let's answer some business questions.
+* When we apply the model and select the best X deciles, what % of the actual target class observations can we expect to target?
+  
+```{r, warning=FALSE, message=FALSE}
+mplot_gain(tag = testSet$Revenue, 
+           score =predict(smote_fit.xgb, testSet,type = "prob")[["second_class"]])
+
+```
+
+  + When we select the **10%** with the highest probability according to XGBoost, this selection contains **53%** of all users who make a purchase in test data.
+  
+* When we apply the model and select up until decile X, what is the expected % of target class observations in the selection?
+
+```{r, warning=FALSE, message=FALSE}
+mplot_response(tag = testSet$Revenue, 
+           score =predict(smote_fit.xgb, testSet,type = "prob")[["second_class"]])
+
+```
+
+* When we select deciles 1 until 3 according to model XGBoost in test data the % of users who make a purchase in the selection is **49%**.
+  
+
+**Thanks for your interest!!**
+
